@@ -1,6 +1,7 @@
 # 🚀 CryptoStream — Monitor de Criptomoedas em Tempo Real
 
-![Crypto-Stream](image.png)
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/27356e41-de94-4238-b28d-b04023e2168f" />
+
 
 > **Stack de streaming**: Kafka + Spark Structured Streaming + PostgreSQL + Redis + Streamlit
 
