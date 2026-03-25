@@ -1,0 +1,178 @@
+version: '3.8'
+
+services:
+  # ──────────────────────────────────────────
+  # Kafka + Zookeeper
+  # ──────────────────────────────────────────
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    hostname: zookeeper
+    container_name: zookeeper
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - stream-net
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    hostname: kafka
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+      - "9101:9101"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+      # Exactly-once semantics
+      KAFKA_ENABLE_IDEMPOTENCE: 'true'
+    networks:
+      - stream-net
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    depends_on:
+      - kafka
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+    networks:
+      - stream-net
+
+  # ──────────────────────────────────────────
+  # PostgreSQL - Sink
+  # ──────────────────────────────────────────
+  postgres:
+    image: postgres:15
+    container_name: postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: cryptouser
+      POSTGRES_PASSWORD: cryptopass
+      POSTGRES_DB: cryptodb
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - stream-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cryptouser -d cryptodb"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ──────────────────────────────────────────
+  # Redis - Cache de Alertas
+  # ──────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    networks:
+      - stream-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ──────────────────────────────────────────
+  # Producer - Coinbase WebSocket → Kafka
+  # ──────────────────────────────────────────
+  producer:
+    build:
+      context: ./producer
+      dockerfile: Dockerfile
+    container_name: crypto-producer
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      KAFKA_TOPIC: crypto-prices
+      SYMBOLS: BTC-USD,ETH-USD,SOL-USD,DOGE-USD,BNB-USD
+    networks:
+      - stream-net
+    restart: on-failure
+
+  # ──────────────────────────────────────────
+  # Spark Streaming Processor
+  # ──────────────────────────────────────────
+  spark-processor:
+    build:
+      context: ./spark_processor
+      dockerfile: Dockerfile
+    container_name: spark-processor
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      KAFKA_TOPIC: crypto-prices
+      POSTGRES_URL: postgresql://cryptouser:cryptopass@postgres:5432/cryptodb
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      ALERT_THRESHOLD_PCT: "2.0"
+    networks:
+      - stream-net
+    restart: on-failure
+
+  # ──────────────────────────────────────────
+  # Dashboard Streamlit
+  # ──────────────────────────────────────────
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    container_name: crypto-dashboard
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8501:8501"
+    environment:
+      POSTGRES_URL: postgresql://cryptouser:cryptopass@postgres:5432/cryptodb
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    networks:
+      - stream-net
+    restart: on-failure
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  stream-net:
+    driver: bridge
